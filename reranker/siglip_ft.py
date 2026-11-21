@@ -95,6 +95,8 @@ def main():
     ap.add_argument("--txt_neg", type=float, default=0.5, help="fraction of batch rows that also get a text negative")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--family_json", default="", help="runs/family_of.json: true families (id -> key). Used for batches; eval only on queries whose family has no training member")
+    ap.add_argument("--select", default="recall", choices=["recall", "score"], help="epoch selection: mean(R@3,R@4,R@5) or stage-1 score")
     a = ap.parse_args()
     random.seed(a.seed); np.random.seed(a.seed); torch.manual_seed(a.seed)
     rng = random.Random(a.seed)
@@ -109,7 +111,8 @@ def main():
     va_ids, pool_ids = sp[a.eval_on], sp[a.eval_on] + sp[other]
     assert not set(tr_ids) & set(va_ids)
 
-    # proxy sibling groups (word-set Jaccard >= 0.7) within the training ids
+    fam_of = json.load(open(a.family_json)) if a.family_json else None
+    # sibling groups: true families if given, else proxy (word-set Jaccard >= 0.7) within the training ids
     from scipy.sparse import csr_matrix
     from sklearn.feature_extraction.text import CountVectorizer
     X = csr_matrix(CountVectorizer(binary=True, token_pattern=r"[a-zA-Z-]+").fit_transform(
@@ -129,7 +132,7 @@ def main():
         parent[find(x)] = find(y)
     groups = {}
     for n in range(len(tr_ids)):
-        groups.setdefault(find(n), []).append(n)
+        groups.setdefault(fam_of[tr_ids[n]] if fam_of else find(n), []).append(n)
     groups = list(groups.values())
     print(f"[data] train {len(tr_ids)} in {len(groups)} proxy groups (multi-member {sum(len(g) > 1 for g in groups)})")
 
@@ -150,6 +153,14 @@ def main():
     print(f"[data] decoded {len(tr_ids) + len(pool_ids)} images in {time.perf_counter() - t0:.0f}s")
     tr_texts = [recs[i]["prompts"] for i in tr_ids]
     va_texts = [recs[i]["prompts"] for i in va_ids]
+    tr_set = set(tr_ids)
+    eval_mask = np.ones(len(va_ids), bool)
+    if fam_of:
+        fam_members = {}
+        for i, f in fam_of.items():
+            fam_members.setdefault(f, []).append(i)
+        eval_mask = np.array([not any(j in tr_set for j in fam_members[fam_of[i]]) for i in va_ids])
+        print(f"[data] eval on {eval_mask.sum()} {a.eval_on} queries whose family has no training member (families complete in the pool)")
 
     def enc_text(texts):
         e = tok([t.lower() for t in texts], padding="max_length", truncation=True, max_length=64, return_tensors="pt")
@@ -168,7 +179,7 @@ def main():
             I = torch.cat([enc_img(pool_imgs[s:s + 128]) for s in range(0, len(pool_imgs), 128)])
         S = T.float() @ I.float().T
         gt = torch.arange(len(va_ids), device=dev)
-        rank = ((S > S[gt, gt][:, None]).sum(1) + 1).cpu().numpy()
+        rank = ((S > S[gt, gt][:, None]).sum(1) + 1).cpu().numpy()[eval_mask]
         score = np.mean([0.5 * ((k == 1) + (1 / math.log2(k + 1) if k <= 5 else 0)) for k in rank])
         m.train()
         return {f"R@{k}": float((rank <= k).mean()) for k in (1, 3, 4, 5, 8)} | {"score": float(score)}
@@ -206,7 +217,8 @@ def main():
     total = steps_ep * a.epochs
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / max(1, int(0.1 * total))) *
                                               0.5 * (1 + math.cos(math.pi * min(1.0, s / total))))
-    best = (base["score"], None, 0)
+    crit = (lambda r: (r["R@3"] + r["R@4"] + r["R@5"]) / 3) if a.select == "recall" else (lambda r: r["score"])
+    best = (crit(base), None, 0)
     for ep in range(1, a.epochs + 1):
         t_ep, run = time.perf_counter(), []
         for b in batches():
@@ -230,8 +242,8 @@ def main():
         res = evaluate()
         print(f"[epoch {ep}] loss {np.mean(run):.4f} | {res} | {time.perf_counter() - t_ep:.0f}s", flush=True)
         log.append({"epoch": ep, **res})
-        if res["score"] > best[0]:
-            best = (res["score"], {n: (mod.A.detach().cpu().clone(), mod.B.detach().cpu().clone())
+        if crit(res) > best[0]:
+            best = (crit(res), {n: (mod.A.detach().cpu().clone(), mod.B.detach().cpu().clone())
                                    for n, mod in m.named_modules() if isinstance(mod, LoRALinear)}, ep)
     json.dump({"args": vars(a), "log": log, "best_epoch": best[2]}, open(os.path.join(a.out, "log.json"), "w"), indent=1)
     if best[1] is None:
@@ -249,7 +261,7 @@ def main():
         if os.path.exists(os.path.join(a.siglip, f)):
             import shutil
             shutil.copy(os.path.join(a.siglip, f), os.path.join(md, f))
-    print(f"[done] best epoch {best[2]} score {best[0]:.4f} (base {base['score']:.4f}); saved {md}")
+    print(f"[done] best epoch {best[2]} {a.select} {best[0]:.4f} (base {crit(base):.4f}); saved {md}")
 
 
 if __name__ == "__main__":

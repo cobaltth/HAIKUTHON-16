@@ -1,6 +1,35 @@
 # C-reranker: SigLIP2 retrieval + LoRA-tuned Qwen3-VL-Reranker-2B (v4)
 
 Submission ZIPs are too large for git (4.2-4.5 GB). They are on the team Drive under `haikuthon/`; this folder has the code to rebuild them.
+LoRA weights: Drive `haikuthon/qwen_lora_v4/` (PEFT adapter `adapter_model.safetensors` + `adapter_config.json`, raw `lora_ep*.pt`, merged bf16 model `merged/`).
+
+## 한국어 요약
+
+**1단계 (검색)**: `google/siglip2-so400m-patch14-384`를 256px로 실행 (위치 임베딩 보간), fp16, 질의 소문자화, max_length 64. 질의마다 16,000장 전체와 코사인 유사도 → 상위 후보.
+
+**2단계 (재정렬)**: `Qwen/Qwen3-VL-Reranker-2B` + LoRA (r16, α32, 언어 모델의 q/k/v/o/gate/up/down, 2에폭). 서버에는 병합 후 int8(128개 단위 스케일)로 저장하고 로드 시 bf16으로 복원.
+- 프롬프트 (system·instruct 없음): `<|im_start|>user\n<Query>:{질의}\n<Document>:{256px 이미지}<|im_end|>\n<|im_start|>assistant\n`
+- 점수 = 마지막 토큰 hidden · (W_yes − W_no)
+- 학습 음성: 같은 패밀리 형제(가중치 2) + SigLIP 상위 8 + 규칙 기반 캡션 변형(색·무늬·재질 교체, 좌우/위아래/앞뒤 반전, 개수 ±1)
+
+**k와 시간 가드**: 질의별로 1단계 점수 차(≤0.05)로 k를 1→6까지 정하고, 모든 질의의 순위 0·1 → 순위 2 → 순위 3 … 순서로 처리. `predict()` 안에서 780초가 지나면 멈추고, 남은 후보는 SigLIP 순서 유지.
+
+**결과**: val(1,600장 풀) 0.849, 리더보드 **0.3038** (아래 표). 테스트에서는 1단계 recall(R@5 ≈ .43)과 재정렬 깊이가 병목.
+
+## Leaderboard (public, 8,000 queries × 16,000 images)
+
+| submission | stage 1 | stage 2 | R@1 | R@5 | NDCG@5 | score | time |
+|---|---|---|---|---|---|---|---|
+| vlm_k3_224_v1 (B) | siglip-base-patch16-224 | zero-shot Qwen3-VL-Reranker-2B, k=3, 224 px | .1872 | .4319 | .3112 | .2492 | 12:59 (guard) |
+| CLIP+VLM_v1 (A) | CLIP (+SigLIP?) | VLM, k=5 | .2725 | .4644 | .3826 | .3275 | 6:26 |
+| **minprompt = v4 (C)** | SigLIP2-so400m @256 | LoRA reranker, adaptive k≤6, 256 px | .2566 | .4338 | .3511 | .3038 | 13:00 (guard) |
+
+What the test told us:
+- SigLIP2-so400m@256 has the same R@5 as siglip-base-224 (.434 vs .432): the bigger stage-1 model bought no test recall, only stage-1 time.
+- The two stage-1 models find different family members: their top-5 lists share only 1.9 of 5 images on average.
+- R@1/R@5 is .59 for both v4 and the zero-shot k=5 submission (.43 for zero-shot k=3). v4 hit the time guard, so it saw only ~3-4 candidates per query; the LoRA's val accuracy (.93 when the answer is in the top-5) did not fully carry over.
+- Reranker resolution on valA/4000 pool (fixed k): 256 px 20.2 ms/pair (k5 .819), 224 px 16.8 ms (k5 .807), 192 px 13.9 ms (k5 .801).
+- Leak check: on valA queries whose family has no train member, LoRA accuracy (answer in top-5 → ranked 1st) is .927 (v4) / .943 (v2) vs .543 zero-shot, equal to leaky families → the LoRA generalises to unseen families of the same generator.
 
 ## Pipeline (`model.py`, the submission entry point)
 

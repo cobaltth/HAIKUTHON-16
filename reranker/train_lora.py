@@ -209,6 +209,7 @@ def main():
     ap.add_argument("--split", default="splits/split_group_seed42.json")
     ap.add_argument("--groups", default="groups.csv")
     ap.add_argument("--train_on", default="train", help="comma list of split names to train on, e.g. train or train,valA")
+    ap.add_argument("--final", action="store_true", help="final model: train on every listed split even if it overlaps the eval split; keep the last epoch")
     ap.add_argument("--eval_on", default="valA", choices=["valA", "valB"], help="held-out split (pool = it + the other val split)")
     ap.add_argument("--out", default="lora_r16")
     ap.add_argument("--rank", type=int, default=16)
@@ -241,7 +242,7 @@ def main():
     tr_ids = [i for s in a.train_on.split(",") for i in sp[s]]
     other = {"valA": "valB", "valB": "valA"}[a.eval_on]
     va_ids, pool_ids = sp[a.eval_on], sp[a.eval_on] + sp[other]
-    assert not (set(tr_ids) & set(va_ids)), f"eval split {a.eval_on} overlaps the training splits {a.train_on}"
+    assert a.final or not (set(tr_ids) & set(va_ids)), f"eval split {a.eval_on} overlaps the training splits {a.train_on}"
     if set(tr_ids) & set(pool_ids):
         print(f"[data] note: {len(set(tr_ids) & set(pool_ids))} pool images are training images (eval slightly optimistic)")
     gid = {}
@@ -393,7 +394,7 @@ def main():
         log.append({"epoch": ep, "R@1": r1, "NDCG@5": nd, "score": sc})
         state = {n: (m.A.detach().cpu().clone(), m.B.detach().cpu().clone()) for n, m in lora_modules(lm).items()}
         torch.save(state, os.path.join(a.out, f"lora_ep{ep}.pt"))
-        if sc > best[0]:
+        if sc > best[0] or a.final:
             best = (sc, state, ep)
 
     json.dump({"args": vars(a), "log": log, "best_epoch": best[2]}, open(os.path.join(a.out, "log.json"), "w"), indent=1)
