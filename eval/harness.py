@@ -5,6 +5,7 @@
 
 --pool own  : 후보 = 해당 검증셋 이미지 800장 (스타터킷 검증과 같은 조건)
 --pool pair : 후보 = valA+valB 이미지 1,600장 → 테스트처럼 query 1개당 이미지 2장 비율
+--pool all  : 후보 = 4,000장 전체 (테스트 규모에 더 가까움)
               (상대 세트는 이미지만 후보로 쓰고 그 캡션은 안 봄)
 """
 import argparse, importlib.util, json, sys, time
@@ -30,7 +31,10 @@ def build(data_dir, split, which, pool):
                 r = json.loads(line); rows[r["id"]] = r["prompts"]
     q_ids = split[which]
     other = {"valA": "valB", "valB": "valA"}.get(which)
-    img_ids = q_ids + (split[other] if pool == "pair" and other else [])
+    if pool == "all":   # 후보 = 학습 이미지 4,000장 전체 (테스트 규모에 더 가까움; 학습된 모델은 train 이미지를 봤으니 약간 낙관적)
+        img_ids = list(rows)
+    else:
+        img_ids = q_ids + (split[other] if pool == "pair" and other else [])
     queries = [{"prompt_id": i, "prompt": rows[i]} for i in q_ids]
     # 서버와 같이 '문자열 절대 경로'로 넘긴다 (Path 전용 문법을 쓴 model.py가 로컬에서만 통과하는 일 방지)
     candidates = [{"image_id": i, "image_path": str((Path(data_dir) / "images" / f"{i}.png").resolve())}
@@ -60,7 +64,7 @@ def main():
     ap.add_argument("--data", required=True, help="haikuthon-train 폴더")
     ap.add_argument("--split-file", default=str(Path(__file__).resolve().parents[1] / "splits/split_group_seed42.json"))
     ap.add_argument("--split", default="valA", choices=["valA", "valB", "train"])
-    ap.add_argument("--pool", default="pair", choices=["own", "pair"])
+    ap.add_argument("--pool", default="pair", choices=["own", "pair", "all"])
     ap.add_argument("--topk", type=int, default=50, help="순위 분포용으로 predict에 요청할 깊이(≥5)")
     ap.add_argument("--device", default=None)
     ap.add_argument("--save", default=None, help="query별 순위를 json으로 저장 (eval/compare.py 비교, hard negative 마이닝용)")

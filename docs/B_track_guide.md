@@ -147,3 +147,62 @@
   - 결과: /kaggle/working/sub_vlm_k3_224_q8.zip **2.56GB** (2,559,050,909 bytes), SigLIP 389MB + VLM 2.1GB
   - valA(K=3, 224px, T4 fp16): **0.6586** (원본 0.6569), R@1 0.5587, NDCG@5 0.7584, 17.2쌍/s → 양자화 손실 없음
   - 서버 실제 업로드 한도는 미확인 → 운영진 문의 권장
+- 23:47 ★ 첫 LB 결과 vlm_k3_224_v1 (int8 zip 2.56GB): public avg **0.2492** (R@1 0.1872, NDCG@5 0.3112, R@5 0.4319), predict 778.8s(시간 가드 780s 도달 → 일부 질문만 재정렬). BASELINE 0.2319 대비 +0.017
+  - R@5 0.432 = SigLIP 1단계 R@5 (재정렬은 top3 안 순서만 바꿈) → valA 0.934·4000장 외삽보다 훨씬 낮음. 병목은 1단계 재현율
+  - CSV 분포: top-1 고유 이미지 3,782개/8,000질문(최대 한 이미지가 21질문 1위), top-5 전체 고유 8,568장/16,000 → 허브 이미지 문제. 단 테스트 예측 분포로 조정은 규정 위반 → 테스트 기반 허브 보정 금지
+- 23:55 add-one ablation 시작 (Kaggle 새 세션, T4): r0 + a1_last2(기준) + a2 group / a3 flip / a4 textneg / a5 crop 각각 a1 대비 (run_addone.sh, /kaggle/working/addone.log)
+- 00:00 ★ A(태환) LB: CLIP+VLM_v1 public avg **0.3275** (R@1 0.2725, NDCG@5 0.3826, R@5 0.4644), predict 386s. 우리 B 0.2492 대비 +0.078
+  - R@5 0.464 > B 0.432 → 학습한 SigLIP(헤드 1에포크) 1단계 재현율이 zero-shot보다 높음
+  - 5위 안 정답 중 1위 비율 A 59% vs B 43% → 학습한 BLIP-2 ITM + 점수 결합이 zero-shot Qwen보다 강함, 시간도 386s로 전부 재정렬
+  - 두 CSV 비교: top-1 일치 35.3%, 평균 top-5 겹침 3.44/5, A top-1 고유 이미지 4,641 (B 3,782)
+- 00:05 add-one 중간: a1_last2(마지막 2층 학습, 증강 없음) 0.5640 (r1 헤드만 0.5343, r0 0.5166). a6_shuffle(문장 순서 섞기, aug/text_aug.py shuffle_sentences + --sent-shuffle-p) 대기열 추가
+- 00:30 ★ add-one ablation 결과 (SigLIP Base, last2, 3에포크, valA 800/후보 1,600, a1 대비 paired bootstrap)
+  - r0 0.5166 → a1_last2 0.5640: +0.0474 [+0.0274, +0.0676] **채택** (r1 헤드만 0.5343보다 확실히 좋음)
+  - a2 group-batch 0.5376: −0.0265 [−0.0427, −0.0103] **기각 (유의하게 나쁨)**
+  - a3 flip-swap 0.5638: −0.0002 [−0.0066, +0.0065] 불명확 / a4 text-neg 0.5552: −0.0088 [−0.0248, +0.0067] 불명확 / a5 crop: −0.0013 [−0.0086, +0.0062] 불명확
+  - 결론: SigLIP 1단계에는 증강 효과 없음 → last2 학습만 채택, group-batch 제외
+- 00:30 텍스트 TTA (eval/text_tta.py, zero-shot SigLIP, 문장 순서 섞기 버전 평균): 효과 없음
+  - valA/1,600: v1 0.5166 / v2 0.5175 / v4 0.5157 / v8 0.5162 (평균 서로 다른 버전 수 최대 2.4개)
+  - 전체 4,000/4,000: v1 0.4252 R@5 .858 / v2 0.4223 / v4 0.4215 / v8 0.4213 → 약간 하락. 채택 안 함
+- 00:30 C(minprompt) LB 0.3038 (R@1 .257, R@5 .434, 780s). CSV 비교: A↔C top-1 일치 22.8%, top-5 평균 겹침 1.87 (A↔B 3.44) → C는 A와 다른 후보를 잡음. A·C 중 하나라도 1위 정답 ≥ 0.30. CSV 합치기는 규정 위반 → model.py 안에서 앙상블해야 함
+- 00:37 a6_shuffle(문장 순서 섞기, last2) 0.5660: a1 대비 +0.0020 [−0.0080, +0.0123] 불명확 → 증강 전부 효과 없음으로 정리
+- 00:38 C 코드 확인(C-reranker v4): SigLIP2-so400m@256 1단계 + Qwen3-VL-Reranker-2B LoRA(int8, 프롬프트 없음, 20ms/쌍 L4), 질문별 k(gap 0.05, 최대 6), 랭크 순서 재정렬 + 780s 가드, 한 번 디코딩. 로컬 valA 0.849 / LB 0.3038
+- 00:40 결정(안): A를 뼈대로 3단 깔때기 — [1] 학습 SigLIP Base(last2, 4,000쌍) top-K1 20~30 → [2] A의 BLIP-2 ITM으로 top-3 → [3] C의 Qwen LoRA로 애매한 질문 1~3위 재판정(780s 가드), 최종 = BLIP-2+Qwen z-가중합. 용량 ≈ 3.8GB(BLIP-2 int8)
+  - 1단계 앙상블 측정 시작: eval/stage1_fusion.py (valA 800 × 후보 4,000, Base 0-shot / Base a1 / SigLIP2 so400m@256 및 쌍별 z-가중합), /kaggle/working/fuse.log
+
+## 팀 가중치 위치 (마감까지 사용)
+- A(태환, CLIP+VLM_v1 등): https://drive.google.com/drive/folders/1VqjSIPzbnRkDsMNe1cDoMsfF_dR7Noic
+- C(연오, minprompt/v4 등): https://drive.google.com/drive/folders/1PWUw4dB3CEzVvVU4TtAGaLrcpCpS9t69
+- Kaggle에서 받기: `gdown --folder <링크>` (링크 공개 설정 필요), 큰 파일은 /kaggle/working 대신 /tmp에 풀기(작업 폴더 19.5GB 한도)
+- 00:50 ★ 1단계 앙상블 측정 (eval/stage1_fusion.py, valA 800 × 후보 4,000; a1은 train 이미지를 학습에서 봤으므로 약간 낙관적)
+  | 1단계 | score | R@1 | R@3 | R@5 | R@8 | ms/장(T4) |
+  |---|---|---|---|---|---|---|
+  | SigLIP Base 0-shot | 0.431 | 0.276 | 0.675 | 0.869 | 0.991 | 3.1 |
+  | **SigLIP Base a1(last2 학습)** | **0.478** | **0.321** | 0.735 | **0.911** | 1.000 | 3.1 |
+  | SigLIP2 so400m@256 0-shot (C) | 0.420 | 0.266 | 0.678 | 0.847 | 0.990 | 19.3 |
+  | a1×0.6 + so400m×0.4 (z 가중합) | 0.470 | 0.315 | 0.738 | 0.894 | 1.000 | – |
+  | a1×0.7 + so400m×0.3 | 0.469 | 0.310 | 0.750 | 0.904 | 1.000 | – |
+  - 결론: 학습한 SigLIP Base 단독이 최고. SigLIP2를 섞으면 R@3만 조금 오르고 점수·R@5는 하락, 인코딩 6배 느림 → 3단 깔때기 1단계는 학습 Base 단독 (s2_weight 0)
+- 00:50 submission_ens/model.py(3단 깔때기) + tools/build_ens.py 작성, harness에 --pool all 추가. 학습 안 된 BLIP-2/Qwen으로 시간·동작 시험 시작 (/kaggle/working/ens.log)
+- 00:50 A 드라이브 폴더는 로그인 요구(비공개) → '링크가 있는 모든 사용자' 공유 필요. C 폴더는 공개 접근 가능
+- 01:15 ★ A K=20 제출(SIGLIP+BLIP-2_v2) LB 0.2319로 하락 (R@1 .153, R@5 .464, 721.4s)
+  - 원인: A model.py는 time_budget 720s(load_model 시작 기준)에 걸리면 재정렬 중단 + '20칸 중 하나라도 채점 안 된 질문은 통째로 1단계 순위' + 이미지를 번호순으로 처리 → K=20이면 거의 모든 질문이 미완료 → 사실상 SigLIP 단독(R@1 .153). R@5가 v1과 같은 .464인 것도 1단계 그대로라는 증거
+  - 처방: (1) 이미지를 '가장 높은 순위' 순으로 처리 (2) 앞에서부터 채점된 칸까지만 융합(부분 재정렬) (3) K 10 안팎 / BLIP 속도 측정 후 결정
+  - submission_ens/model.py에 (1)(2) 반영 완료
+- 01:15 팀 clean 검증(A 랜덤분할 valid ∩ C 그룹분할 valA∪valB = 304 질문 × 후보 4,000): A K=20 0.6984 (R@1 .579, R@5 .987) — 로컬은 시간 가드 안 걸림
+- 01:30 ★★ 팀 앙상블 검증 (clean 304 질문 × 후보 4,000, Kaggle T4)
+  - A K=20 (A model.py): 0.6984 (R@1 .579, R@5 .987)
+  - ENS = A K=20 → BLIP-2(w .9) → C Qwen LoRA 상위3 (w .5): **0.7930** (R@1 .717) → +0.0946 [+0.0655, +0.1241] **채택**, 질문별 47승 5패
+  - 단, T4에서 Qwen이 912쌍 중 240쌍(120질문)만 처리하고 시간 가드 → Qwen 속도 비정상(≈2.4s/쌍) 점검 필요. 그래도 +0.095
+  - 시간(T4): load 26s / decode 57s / stage1 10s / stage2(BLIP) 148s / stage3 574s(가드)
+- 01:30 1단계 비교 (clean 304 × 4000): A SigLIP 0.4222 (R@5 .888) vs a1 last2 0.4535 (R@5 .924) → a1 방식이 우세, 섞으면 오히려 하락 → 1단계 교체 후보
+- 01:30 제출용 sub_ens_k15_t840 빌드: 3.87GB (siglip fp16 0.41 / blip int8 1.29 / qwen int8 2.17), 검증 진행 중
+
+## 11/22 01:55 현황 점검
+- 리더보드: 16팀 16위 0.3275 (A CLIP+VLM_v1). 1위 7팀 0.4133, realbaseline 0.3915. 제출 5/25.
+- 우리 제출: v1(B) .2492 / A v1 .3275 (386s) / C minprompt .3038 / A K=20 .2319 (fallback) / C v6a .3212 (R@5 .476, 799s).
+- CSV 비교: A K=20과 A v1은 top-5 집합 99.9% 동일, 1위만 다름 → K=20은 사실상 SigLIP 순서 그대로. C와 A의 top-5는 평균 1.9장만 겹침 → 1단계 후보 합치기 여지.
+- 테스트 R@1/R@5 ≈ .59 (BLIP·Qwen 동일) → 병목은 1단계 재현율(R@5 ≈ .46).
+- 로컬 clean 0.80 vs 테스트 0.3 대: A 모델은 무작위 분할로 학습해 형제 이미지를 봤기 때문에 로컬 점수가 부풀려짐.
+- T4 Qwen 느림 원인: bf16 (T4는 bf16 미지원 → 2.37s/pair). L4는 bf16 지원이라 서버는 정상(~20ms).
+- 태환 님: starter_kit_kimth_v1 (4000장 검증, 5위 단위 묶음 재정렬, 840초) 재학습 중.
