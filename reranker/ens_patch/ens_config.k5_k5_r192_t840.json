@@ -1,0 +1,1 @@
+{"k1": 5, "k3": 5, "blip_weight": 0.5, "qwen_weight": 0.5, "rr_res": 192, "time_limit": 840.0, "stage2_deadline": 420.0, "qwen_vcache": true, "qwen_vc_batch": 32}

@@ -1,4 +1,4 @@
-"""HAIKUTHON v1: SigLIP2 retrieval -> Qwen3-VL-Reranker-2B reranking of the top-k.
+"""HAIKUTHON v7: SigLIP2 retrieval -> Qwen3-VL-Reranker-2B reranking of the top-k (vision features cached per image).
 
 Every query is predicted independently: its top-5 depends only on its own text, the candidate images and the
 fixed settings below. No statistics across queries, no cross-query deduplication or matching.
@@ -19,6 +19,7 @@ import contextlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -49,6 +50,11 @@ CFG = {
     "system": "",
     "s1_text_max_len": 64,
     "s1_res": 256,            # SigLIP2 input side (native 384; 256 = same recall, 2.4x faster). 0 = native
+    "vcache": True,           # v7: run the vision tower once per image and reuse its output for every pair
+    "vc_batch": 32,           # pairs per forward in the cached path (text + cached image tokens only)
+    "vc_img_batch": 64,       # images per vision-tower forward
+    "vc_tol": 0.5,            # self-check: max |cached - reference| logit difference before falling back
+    "len_sort": True,         # inside a pass, batch queries of similar token length together (less padding)
 }
 
 
@@ -294,6 +300,11 @@ def predict(model, queries, candidates, top_k=5):
     logits = np.full((nq, kmax), -np.inf, dtype=np.float32)
     scored = np.zeros((nq, kmax), dtype=bool)
     lm, proc, w, bs = m["lm"], m["proc"], m["w"], cfg["rr_batch"]
+    dev = m["device"]
+    vc_info = {"used": False}
+
+    def out_of_time():
+        return time.perf_counter() - t0 > cfg["time_limit"]
 
     def prep(chunk):
         tx = []
@@ -304,25 +315,174 @@ def predict(model, queries, candidates, top_k=5):
         ims = [Image.fromarray(rr_imgs[top_i[q, r]]) for q, r in chunk]
         return proc(text=tx, images=ims, padding=True, return_tensors="pt", do_resize=False)
 
-    chunks = [pairs[s:s + bs] for s in range(0, len(pairs), bs)]
+    def score_ref(inputs):
+        h = lm.model(**inputs.to(dev)).last_hidden_state[:, -1].float()
+        return (h @ w).cpu().numpy()
+
+    def store(chunk, sc):
+        for (q, r), v in zip(chunk, sc):
+            logits[q, r] = v
+            scored[q, r] = True
+
+    def run_reference(todo):
+        """v4-v6 path: every pair goes through the processor and the vision tower."""
+        chunks = [todo[s:s + bs] for s in range(0, len(todo), bs)]
+        with ThreadPoolExecutor(1) as ex:
+            fut = ex.submit(prep, chunks[0]) if chunks else None
+            for ci, chunk in enumerate(chunks):
+                inputs = fut.result()
+                if ci + 1 < len(chunks):
+                    if out_of_time():
+                        return True
+                    fut = ex.submit(prep, chunks[ci + 1])
+                store(chunk, score_ref(inputs))
+                if ci % 200 == 0:
+                    _log(f"rerank(ref) {min((ci + 1) * bs, len(todo))}/{len(todo)} pairs ({time.perf_counter() - t1:.0f}s)")
+        return False
+
+    def run_cached():
+        """v7 path. The vision tower output of an image does not depend on the query, so it is computed once per
+        image (lazily, pass by pass) and re-used; each pair then only costs the language model. Returns
+        (stopped_by_guard, ok). ok=False means the self-check failed and nothing was stored."""
+        ip, tk = proc.image_processor, proc.tokenizer
+        img_tok, pad_id = lm.config.image_token_id, tk.pad_token_id
+        image_token = getattr(proc, "image_token", "<|image_pad|>")
+        vb, ib = int(cfg["vc_batch"]), int(cfg["vc_img_batch"])
+        # passes: ranks 0-1 of every reranked query, then rank 2, rank 3, ...
+        n01 = 2 * int((ks >= 2).sum())
+        segs = [pairs[:n01]]
+        rest = pairs[n01:]
+        for r in range(2, kmax):
+            seg = [p for p in rest if p[1] == r]
+            if seg:
+                segs.append(seg)
+        all_imgs = np.unique(np.array([top_i[q, r] for q, r in pairs], dtype=np.int64))
+        pos = np.full(ni, -1, dtype=np.int64)
+        st = {"E": None, "D": None, "n": 0, "grid": None, "ntok": None, "t_vis": 0.0, "t_lm": 0.0, "ids": {}}
+
+        def img_prep(js):
+            return ip(images=[Image.fromarray(rr_imgs[j]) for j in js], do_resize=False, return_tensors="pt")
+
+        def build(need):
+            """Vision features for the images in `need` (not cached yet). Returns True if the guard fired."""
+            tb = time.perf_counter()
+            groups = [need[s:s + ib] for s in range(0, len(need), ib)]
+            with ThreadPoolExecutor(1) as ex:
+                fut = ex.submit(img_prep, groups[0]) if groups else None
+                for gi, js in enumerate(groups):
+                    enc = fut.result()
+                    if gi + 1 < len(groups):
+                        if out_of_time():
+                            st["t_vis"] += time.perf_counter() - tb
+                            return True
+                        fut = ex.submit(img_prep, groups[gi + 1])
+                    grid = enc["image_grid_thw"].to(dev)
+                    out = lm.model.get_image_features(enc["pixel_values"].to(dev), grid, return_dict=True)
+                    e = torch.stack(list(out.pooler_output))                                  # (b, ntok, D)
+                    d = torch.stack([torch.stack(list(f)) for f in out.deepstack_features])   # (L, b, ntok, D)
+                    if st["E"] is None:
+                        st["E"] = torch.empty((len(all_imgs),) + tuple(e.shape[1:]), dtype=e.dtype, device=dev)
+                        st["D"] = torch.empty((d.shape[0], len(all_imgs)) + tuple(d.shape[2:]), dtype=d.dtype, device=dev)
+                        st["grid"], st["ntok"] = grid[:1].clone(), int(e.shape[1])
+                        _log(f"vcache: {len(all_imgs)} images x {st['ntok']} tokens x {e.shape[2]} dims, {d.shape[0]} deepstack levels, "
+                             f"{(st['E'].numel() + st['D'].numel()) * st['E'].element_size() / 1e9:.1f} GB")
+                    n0 = st["n"]
+                    st["E"][n0:n0 + len(js)] = e
+                    st["D"][:, n0:n0 + len(js)] = d
+                    pos[np.asarray(js)] = np.arange(n0, n0 + len(js))
+                    st["n"] = n0 + len(js)
+            st["t_vis"] += time.perf_counter() - tb
+            return False
+
+        def tok_ids(q):
+            if q not in st["ids"]:
+                if q not in prompts:
+                    prompts[q] = _prompt(m, texts[q])
+                tx = prompts[q].replace(image_token, image_token * st["ntok"])
+                st["ids"][q] = tk(tx, add_special_tokens=False)["input_ids"]
+            return st["ids"][q]
+
+        def make_ids(chunk):
+            seqs = [tok_ids(q) for q, _ in chunk]
+            L = max(len(x) for x in seqs)
+            ids = torch.full((len(chunk), L), pad_id, dtype=torch.long)
+            am = torch.zeros((len(chunk), L), dtype=torch.long)
+            for i, x in enumerate(seqs):          # left padding: the last position is always the real last token
+                ids[i, L - len(x):] = torch.tensor(x, dtype=torch.long)
+                am[i, L - len(x):] = 1
+            return ids, am
+
+        def score_cached(chunk):
+            ids, am = make_ids(chunk)
+            ids, am = ids.to(dev), am.to(dev)
+            j = torch.as_tensor(pos[[top_i[q, r] for q, r in chunk]], device=dev)
+            E, D = st["E"][j], st["D"][:, j]
+            feats = SimpleNamespace(pooler_output=(E.reshape(-1, E.shape[-1]),),
+                                    deepstack_features=[(D[l].reshape(-1, D.shape[-1]),) for l in range(D.shape[0])])
+            out = lm.model(input_ids=ids, attention_mask=am, image_grid_thw=st["grid"].expand(len(chunk), -1),
+                           mm_token_type_ids=(ids == img_tok).to(torch.int32), mm_encoder_outputs={"image": feats})
+            return (out.last_hidden_state[:, -1].float() @ w).cpu().numpy()
+
+        def fin(stopped_, ok_=True):
+            vc_info.update({"images": st["n"], "t_vis": round(st["t_vis"], 2), "t_lm": round(st["t_lm"], 2)})
+            return stopped_, ok_
+
+        checked = False
+        for si, seg in enumerate(segs):
+            need = [int(j) for j in np.unique(np.array([top_i[q, r] for q, r in seg], dtype=np.int64)) if pos[j] < 0]
+            if not checked:
+                # self-check on the first pairs: cached path must reproduce the reference path
+                probe = seg[:min(8, len(seg))]
+                if build([int(j) for j in dict.fromkeys(int(top_i[q, r]) for q, r in probe)]):
+                    return fin(True)
+                ref_in = prep(probe)
+                my_ids, _ = make_ids(probe)
+                same = tuple(ref_in["input_ids"].shape) == tuple(my_ids.shape) and bool((ref_in["input_ids"] == my_ids).all())
+                vc_info["ids_match"] = same
+                a_ref = score_ref(ref_in)
+                a_vc = score_cached(probe)
+                diff = float(np.abs(a_ref - a_vc).max())
+                vc_info["check_diff"] = diff
+                _log(f"vcache self-check: token ids match={same}, max |cached - reference| = {diff:.4f} (tol {cfg['vc_tol']})")
+                if not np.isfinite(diff) or diff > cfg["vc_tol"]:
+                    return fin(False, False)
+                checked = True
+                need = [j for j in need if pos[j] < 0]
+            if build(need):
+                return fin(True)
+            if cfg.get("len_sort", True):
+                if si == 0:   # keep (q,0),(q,1) together, queries ordered by token length
+                    qs = sorted(dict.fromkeys(q for q, _ in seg), key=lambda q: len(tok_ids(q)))
+                    seg = [(q, r) for q in qs for r in range(2)]
+                else:
+                    seg = sorted(seg, key=lambda p: len(tok_ids(p[0])))
+            tl = time.perf_counter()
+            for ci, s in enumerate(range(0, len(seg), vb)):
+                if out_of_time():
+                    st["t_lm"] += time.perf_counter() - tl
+                    return fin(True)
+                chunk = seg[s:s + vb]
+                store(chunk, score_cached(chunk))
+                if ci % 200 == 0:
+                    _log(f"rerank pass {si} {min(s + vb, len(seg))}/{len(seg)} pairs ({time.perf_counter() - t1:.0f}s)")
+            st["t_lm"] += time.perf_counter() - tl
+        return fin(False)
+
     stopped = False
-    with ThreadPoolExecutor(1) as ex:
-        fut = ex.submit(prep, chunks[0]) if chunks else None
-        for ci, chunk in enumerate(chunks):
-            inputs = fut.result()
-            if ci + 1 < len(chunks):
-                if time.perf_counter() - t0 > cfg["time_limit"]:
-                    stopped = True
-                    break
-                fut = ex.submit(prep, chunks[ci + 1])
-            inputs = inputs.to(m["device"])
-            h = lm.model(**inputs).last_hidden_state[:, -1].float()
-            sc = (h @ w).cpu().numpy()
-            for (q, r), v in zip(chunk, sc):
-                logits[q, r] = v
-                scored[q, r] = True
-            if ci % 200 == 0:
-                _log(f"rerank {min((ci + 1) * bs, len(pairs))}/{len(pairs)} pairs ({time.perf_counter() - t1:.0f}s)")
+    if pairs and cfg.get("vcache", True):
+        try:
+            stopped, ok = run_cached()
+            vc_info["used"] = ok
+        except Exception as e:  # any API mismatch -> reference path (still a valid submission)
+            _log(f"WARNING vcache failed ({e!r}); using the reference path")
+            ok = False
+            vc_info["error"] = repr(e)
+        if not ok:   # keep whatever the cached path already scored, do the rest the old way
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            stopped = run_reference([p for p in pairs if not scored[p[0], p[1]]])
+    elif pairs:
+        stopped = run_reference(pairs)
     if stopped:
         _log(f"TIME GUARD: stopped at {time.perf_counter() - t0:.0f}s")
 
@@ -342,6 +502,6 @@ def predict(model, queries, candidates, top_k=5):
     t2 = time.perf_counter()
     m["_last"] = {"top_i": top_i, "top_s": top_s, "logits": logits, "scored": scored, "ks": ks}  # for offline analysis
     m["_timing"] = {"stage1": t1 - t0, "rerank": t2 - t1, "pairs_done": int(scored.sum()), "pairs_planned": len(pairs),
-                    "reranked_queries": n_rr, "full_k_queries": n_full}
+                    "reranked_queries": n_rr, "full_k_queries": n_full, "vcache": vc_info}
     _log(f"predict done in {t2 - t0:.1f}s; reranked {n_rr}/{nq} queries")
     return preds
