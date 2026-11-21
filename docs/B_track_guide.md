@@ -38,9 +38,9 @@
 - [ ] 승자 선정 (점수·시간·용량 함께 고려)
 
 ## 5단계: hard negative 생성 + 파인튜닝 (19:30~01:00)  [ ]
-- [ ] 텍스트 hard negative: 규칙 기반으로 색/개수/관계/물체 치환 (코드로만)
+- [x] (코드 준비) 텍스트 hard negative: 규칙 기반으로 색/개수/관계/물체 치환 (코드로만)
 - [ ] 이미지 hard negative: 1단계가 높은 순위에 올린 오답 이미지 마이닝
-- [ ] 대조학습 FT (train 2,400), 이미지 증강은 약한 크롭(scale 0.8–1.0)만. 색 jitter·좌우 반전 금지
+- [ ] 대조학습 FT (train 2,400), 이미지 증강은 약한 크롭(0.9–1.0) + 좌우 반전(**문장의 left↔right를 같이 바꿀 때만 허용**). 색 jitter 금지
 - [ ] val-A로 비교, 최종 val-B 1회 확인
 
 ## 6단계: 마무리  [ ]
@@ -72,3 +72,17 @@
   - 스타터킷 무작위 분할은 검증 캡션의 79%가 train에 형제를 둠 → 검증이 테스트와 다른 조건일 가능성
   - eval/harness.py: 제출 폴더 model.py 그대로 채점, --pool pair(valA+valB 1,600장, 1:2 비율) 기본. 가짜 모델로 점수식 검증 완료
   - 다음: 첫 제출 LB 점수 vs (group/pair) vs (random/own) 비교로 "테스트에 형제 이미지 있음" 가설 확인
+- 17:11 정정: A의 첫 제출은 sample이 아니라 팀 자체 모델. 대회 공지 sample_submission LB = 0.2319 (스타터킷 자체 검증 0.784와 큰 차이 → 후보 16,000장 + 형제 이미지 영향 추정)
+  - 주의: sample은 스타터킷 무작위 3,200쌍으로 학습 → 우리 valA의 약 80%를 학습에서 봄. sample은 random split val로만 평가할 것. A 모델도 학습 분할 확인 필요 (평가용은 group train 2,400으로)
+- 17:35 학습 도구 aug/ 작성·검증 (GPU 불필요 부분 완료, 실제 학습은 3·4단계 후)
+  - GroupBatchSampler: 배치 32 기준 형제와 같은 배치 샘플 80% (무작위 4%) ← 발표용 수치
+  - 텍스트 오답 생성 가능: 색 88% / 관계 73% / 색결합 71% / 무늬 27% / 재질 16%
+  - 반전+left↔right 교환(정답 쌍), 약한 크롭, SigLIP 손실+텍스트 오답 항(동작 검증 완료)
+  - ablation 순서: 기본 FT → +그룹배치 → +반전교환 → +텍스트오답 → +크롭
+- 17:40 리뷰 반영 (eval/): 이미지 경로 문자열 절대경로로 전달 / 채점 전 top_k=5 서버 형식 검사(중복·개수·후보 외 id) / 스타터 가중치+그룹 분할 조합 경고 / eval/compare.py(paired bootstrap 95% CI 채택 판정) 추가. 가짜 모델 3종으로 테스트 통과
+- 17:45 2번(육안 점검) 완료, viz/ 저장: 반전+교환 4/4 캡션 일치(이미지 내 글자 없음 → 안전). 크롭 0.8은 가장자리 물체 반쯤 잘림 2건(0572, 1060) → 기본 0.9로 상향, ablation 최하위. 다음: 1번 학습 스크립트(어댑터 구조), A에게 백본·분할·학습층·해상도 문의
+- 18:00 학습 스크립트 완료 (train/): train_b.py(어댑터 구조, 그룹 분할, 증강 옵션 전부 기본 꺼짐, 스타터킷 predict로 매 에포크 valA 채점, best 저장, runs/<name>.json → compare.py), adapters.py(SiglipAdapter, 새 백본은 클래스만 추가), run_ablation.sh(r0~r5 누적 + 자동 비교), KAGGLE.md(셀 순서). submission_template/ = 스타터킷 model.py
+  - 스모크 테스트(CPU, 작은 랜덤 SigLIP): 학습→평가→저장→하네스 재채점 점수 일치(0.2003), 텍스트 오답 실제 투입 확인
+  - 출발 가중치는 google/siglip-base-patch16-224 (스타터킷 예제 가중치는 valA 오염)
+  - 다음: Kaggle에서 r0_zeroshot 먼저 → run_ablation.sh
+- 17:57 규칙 변경 반영: "좌우 반전 금지" → "좌우 반전은 문장의 left↔right를 같이 바꿀 때만 허용". 코드상 hflip은 항상 swap_left_right와 함께만 호출됨(train_b.py, aug/dataset.py) 확인

@@ -15,7 +15,7 @@
 ```python
 !pip -q install "transformers==5.22.2" "sentencepiece==0.2.3" "huggingface_hub>=1.0"
 ```
-설치 후 **Run → Restart & clear outputs 없이 커널만 재시작**하고 `%cd /kaggle/working/repo` 다시 실행.
+스크립트는 `!python`으로 따로 실행되므로 재시작 없이 바로 다음 셀로 넘어가도 됨.
 
 ## 3. 데이터 받기 (약 3.6GB, 몇 분)
 ```python
