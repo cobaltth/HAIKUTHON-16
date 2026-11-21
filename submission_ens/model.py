@@ -1,12 +1,12 @@
 """HAIKUTHON 팀 앙상블: 3단 깔때기 (A 뼈대 + C 재정렬기)
 
   [1] SigLIP (A가 학습한 Base, 선택: C의 SigLIP2를 질문별 z-가중합)  → 질문마다 상위 k1개
-  [2] BLIP-2 ITM (A가 학습한 재정렬기)  → 1단계 점수와 질문별 z-가중합(A의 rerank_weight) → 순위
-  [3] Qwen3-VL-Reranker-2B LoRA (C)  → 2단계 1·2위 차이가 작은 질문부터 상위 k3개를 다시 채점,
-                                       2단계 점수와 질문별 z-가중합(qwen_weight)  → 최종 top-5
+  [2] BLIP-2 ITM (A의 재정렬기 + 학습 데이터 쌍둥이 세트로 추가 학습한 LoRA)  → 1단계 점수와 질문별 z-가중합(A의 rerank_weight) → 순위
+  [3] Qwen3-VL-Reranker-2B LoRA (C)  → 모든 질문의 2단계 상위 k3개를 입력 순서대로 다시 채점,
+                                       2단계 점수에 Qwen 로짓을 더해(qwen_scale)  → 최종 top-5
 
 규정 관련: 모든 정규화·순위는 '질문 하나의 점수'만 사용. 다른 질문의 점수·예측 분포를 쓰지 않음.
-           Qwen 처리 순서를 정할 때 쓰는 '2단계 1·2위 차이'도 질문 자신의 점수라 같은 원칙.
+           처리 순서도 입력 순서 그대로(질문끼리 비교해서 정하지 않음).
 시간: predict() 안에서 stage2_deadline(2단계), time_limit(3단계)이 지나면 남은 작업은 앞 단계 순위로 대체.
 이미지: PNG를 한 번만 디코딩해 224px(SigLIP/BLIP-2 공통)와 rr_res px(Qwen·SigLIP2 공통) 복사본을 만든다.
 
@@ -50,6 +50,7 @@ DEFAULT_CFG = {
     "blip_image_batch": 96,
     "blip_pair_batch": 512,
     "qwen_batch": 16,
+    "blip_lora": "lora_ft.safetensors",   # models/blip/ 안의 LoRA 파일 이름 ("" 이면 합치지 않음)
     "qwen_vcache": True,      # C v7: Qwen 비전 특징을 이미지당 1회만 계산 (False면 기존 경로)
     "qwen_vc_batch": 32,
     "qwen_vc_tol": 0.5,
@@ -115,7 +116,7 @@ def _fill_q8(model, folder, sd_file="model_q8.safetensors"):
                 msd[k].copy_(msd[src])
 
 
-def _load_blip(folder, device):
+def _load_blip(folder, device, lora="lora_ft.safetensors"):
     from transformers import AutoConfig, AutoProcessor, Blip2ForImageTextRetrieval
     if (folder / "model_q8.safetensors").exists():
         cfg = AutoConfig.from_pretrained(folder, local_files_only=True)
@@ -130,6 +131,18 @@ def _load_blip(folder, device):
         _fill_q8(blip, folder)
     else:
         blip = Blip2ForImageTextRetrieval.from_pretrained(folder, dtype=torch.float16, local_files_only=True)
+    lf = folder / (lora or "__none__")
+    if lora and lf.exists():   # 학습 데이터의 쌍둥이 세트로 추가 학습한 Q-Former LoRA를 원래 가중치에 합친다 (추론 시간 변화 없음)
+        from safetensors.torch import load_file
+        sd = load_file(str(lf))
+        mods = dict(blip.named_modules())
+        sc = float(sd["scale"][0])
+        with torch.no_grad():
+            for k in [k[:-2] for k in sd if k.endswith(".A")]:
+                w = mods[k].weight
+                w.add_(((sd[k + ".B"].float() @ sd[k + ".A"].float()) * sc).to(w.dtype))
+            blip.itm_head.weight.copy_(sd["itm_head.weight"].to(blip.itm_head.weight.dtype))
+            blip.itm_head.bias.copy_(sd["itm_head.bias"].to(blip.itm_head.bias.dtype))
     blip = blip.to(device).eval()
     proc = AutoProcessor.from_pretrained(folder, local_files_only=True)
     return blip, proc
@@ -199,7 +212,7 @@ def load_model(model_dir, device):
     if cfg["s2_weight"] > 0 and (root / "siglip2").exists():
         m["s2"] = AutoModel.from_pretrained(root / "siglip2", dtype=fp, local_files_only=True).to(device).eval()
         m["s2_tok"] = AutoTokenizer.from_pretrained(root / "siglip2", local_files_only=True)
-    m["blip"], m["blip_proc"] = _load_blip(root / "blip", device)
+    m["blip"], m["blip_proc"] = _load_blip(root / "blip", device, cfg.get("blip_lora", "lora_ft.safetensors"))
     if cfg["qwen_weight"] > 0 and (root / "qwen").exists():
         m["qwen"], m["qwen_proc"], m["qwen_w"] = _load_qwen(root / "qwen", device, lm_dtype)
     _log(cfg, f"load {time.time()-t0:.0f}s | s2={'s2' in m} qwen={'qwen' in m} | cfg={cfg}")
