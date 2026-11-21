@@ -13,10 +13,6 @@
 ZIP 구성
   model.py
   models/ens_config.json         설정 (아래 DEFAULT_CFG 덮어쓰기)
-  models/siglip/                 SigLIP Base (A 학습본; HF 형식)
-  models/siglip2/   (선택)       SigLIP2 so400m (C의 1단계; 있으면 s2_weight로 융합)
-  models/blip/                   BLIP-2 ITM (HF 형식, 또는 model_q8.safetensors + q8_meta.json)
-  models/qwen/      (선택)       Qwen3-VL-Reranker (C 형식 int8.safetensors 또는 HF 형식)
 """
 import contextlib
 import json
@@ -298,6 +294,8 @@ def _stage2(m, texts, a224, topi, deadline):
     scores = torch.full((nq, k), float("nan"))
     tok = bproc.tokenizer(texts, padding="longest", truncation=True, max_length=cfg["blip_text_tokens"], return_tensors="pt")
     ids_all, mask_all = tok.input_ids.to(dev), tok.attention_mask.to(dev)
+    qlen = mask_all.sum(1).tolist()
+    fp16 = bool(cfg.get("itm_fp16", True)) and str(dev).startswith("cuda")
     # 이미지 → (질문, 칸) 목록. 상위 칸(순위가 높은 후보)을 먼저 처리해 시간이 모자라도 앞 순위부터 채워지게 정렬
     best_rank = {}
     pairs_by_img = {}
@@ -316,11 +314,14 @@ def _stage2(m, texts, a224, topi, deadline):
         chunk = imgs[s:s + ib]
         emb = _blip_image_embeds(blip, _to_pixels(a224[chunk], CLIP_MEAN, CLIP_STD, dev, vdt))
         pairs = [(li, q, r) for li, j in enumerate(chunk) for q, r in pairs_by_img[j]]
+        pairs.sort(key=lambda t: qlen[t[1]])
         for p in range(0, len(pairs), pb):
             li, q, r = (torch.tensor(c) for c in zip(*pairs[p:p + pb]))
             qd = q.to(dev)
-            v = _blip_itm(blip, emb[li.to(dev)], ids_all[qd], mask_all[qd])
-            scores[q, r] = v.cpu()
+            L = int(max(qlen[i] for i in q.tolist()))
+            with torch.autocast("cuda", dtype=torch.float16, enabled=fp16):
+                v = _blip_itm(blip, emb[li.to(dev)], ids_all[qd, :L], mask_all[qd, :L])
+            scores[q, r] = v.float().cpu()
     return scores, stopped
 
 
@@ -437,4 +438,4 @@ def predict(model, queries, candidates, top_k=5):
         _log(cfg, f"stage3 {time.time()-t2:.0f}s | Qwen 쌍 {done}/{plan}, 반영 질문 {n_used}")
     preds = {qid: [img_ids[j] for j in row[:top_k]] for qid, row in zip(qids, final.tolist())}
     _log(cfg, f"predict {time.time()-t0:.0f}s")
-    return preds
+    return preds                                                          
