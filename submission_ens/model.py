@@ -467,7 +467,7 @@ def _stage3(m, texts, arr, order_i, margin, deadline):
         if not (diff <= float(cfg.get("qwen_vc_tol", 0.5))):
             return -1
         n = 0
-        for s in range(0, len(plan), blk):       # 우선순위(여유 작은 질문 먼저)는 블록 단위로 유지하고, 블록 안에서만 길이순으로 묶는다
+        for s in range(0, len(plan), blk):       # 입력 순서는 블록(1,024쌍) 단위로 유지하고, 블록 안에서만 문장 길이순으로 묶는다 (질문 우선순위 없음)
             if time.time() > deadline:
                 break
             block = plan[s:s + blk]

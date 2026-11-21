@@ -36,6 +36,16 @@
 | 11 | 20,987바이트, CRC32 `7f5c404c` (= `model_zip_min.py`) | 114바이트, CRC32 `e704fd47` (= `ens_config.k20_qwen2_fuse.json` + 뒤 공백) |
 
 ## BLIP LoRA (추가 학습분)
-- `train/blip_ft.py`로 만든 `blip_lora_b.safetensors` (9,717,540바이트, md5 `b78a714004a153020a6e968e2e324d88`): Q-Former Linear 120개의 LoRA(r16, alpha32) + `itm_head`.
-- 위 `models/blip/model_q8.safetensors`를 되돌린 가중치 위에서 학습했으므로 **같은 int8 파일과 함께** 써야 한다. zip에는 `models/blip/lora_ft.safetensors`로 넣는다.
+| 파일 | 바이트 | md5 | 학습 | 쓴 제출 |
+|---|---|---|---|---|
+| `blip_lora_b.safetensors` | 9,717,540 | `b78a714004a153020a6e968e2e324d88` | `train/blip_ft.py`: 8장 세트 276개, lr 6e-4, 4바퀴째 | 13 |
+| `blip_lora_c.safetensors` | 9,717,540 | `1fbdfbe24d92a209c9c7bc9a7920f73f` | `train/blip_ft2.py`: 8장 세트 276개 + 4장 세트 339개, lr 6e-4, 4바퀴째 | 15 |
+
+- 내용: Q-Former Linear 120개의 LoRA(r16, alpha32) + `itm_head`. zip에는 `models/blip/lora_ft.safetensors`로 넣는다.
+- 위 `models/blip/model_q8.safetensors`를 되돌린 가중치 위에서 학습했으므로 **같은 int8 파일과 함께** 써야 한다.
 - 10MB라 git에 올릴 수 있다(저장소가 공개라 올리는 시점은 팀이 정함).
+
+## Qwen scene (제출 15)
+- zip 안 `models/qwen/int8.safetensors`를 C의 Drive `haikuthon/qwen_lora_scene/int8.safetensors`로 제자리 교체했다.
+- 크기 2,162,922,376바이트(v4와 같음), CRC32 `968a464c` (v4는 `61e3adb3`). 텐서 927개의 이름·dtype·shape가 v4와 같다. 프롬프트는 v4와 같은 빈 프롬프트.
+- 제출 15의 zip: `sub_final_c_scene.zip` (3,886,200,008바이트). `model.py`·설정·LoRA는 `zip_append.py`로 덧붙였기 때문에, 목차에서 빠진 옛 항목의 바이트가 본문에 조금 남아 있다(무시됨).

@@ -16,11 +16,15 @@
 | 06 | `ens_A_blip_C_qwen_k15` | 커밋 65ff803의 `model.py` (md5 33c6b53b…) | `ens_config.k15_t840.json` | 0.3231 | .273 / .477 | 841s |
 | 09 | `sub_blip_k32_fp16` | `model_k32_blip_only.py` (md5 407e2334…) | `ens_config.k32_blip_fp16.json` | 0.4372 | .321 / .753 | 655s |
 | 11 | `blip_k24_qwen3_fuse` | `model_zip_min.py` (md5 4a9e0386…, 읽기용 원본 `model_v4_fuse.py`) | `ens_config.k20_qwen2_fuse.json` | 0.4804 | .396 / .719 | 738s |
+| 13 | `lora_k28_qwen2_fuse` | `model.py` (v5, md5 c2d80207…) + LoRA b | `ens_config.lora_b_k28_qwen2.json` | 0.5305 | .438 / .784 | 811s |
+| 15 | `lora_c_scene_k20_qwen3` | `model.py` (v5) + LoRA c + Qwen scene | `ens_config.lora_c_scene_k20_qwen3.json` | (결과 대기) | | 예상 818s |
 
 - **11번 이름 주의.** 사이트에 적은 이름은 `blip_k24_qwen3_fuse`지만, 올린 zip(`sub_blip_qwen_fuse_v4.zip`) 안의 실제 설정은 **k1=20, k3=2, stage2_deadline 620, time_limit 838**이다. k1=24·k3=3 설정으로 낸 제출은 없다(이름만 이전 계획대로 적은 것). 그래서 `ens_config.k24_...` 파일은 없고, `ens_config.k20_qwen2_fuse.json`이 11번의 설정이다.
   - 확인 방법: zip 안 `models/ens_config.json`은 같은 JSON 뒤에 공백을 붙여 114바이트로 맞춘 것(CRC32 `e704fd47`), `model.py`는 `model_zip_min.py`와 같은 바이트(20,987바이트, CRC32 `7f5c404c`).
 - 06번에는 3단계에서 "2단계 1·2위 차이가 작은 질문부터" Qwen을 돌리는 순서가 들어 있었다. 운영진 답변(11/22 04:15, "한 질문의 결과가 다른 테스트 항목의 예측 때문에 달라지면 안 됨") 기준으로 걸리므로 **최종 선택에서 제외**. 09·11번에는 그 순서가 없다.
-- 세 제출의 가중치 파일은 같다(같은 zip에서 model.py와 설정만 제자리 교체). 목록은 `WEIGHTS.md`. 09번은 zip에 Qwen이 들어 있지만 `qwen_weight: 0`이라 불러오지 않는다.
+- 06·09·11번의 가중치 파일은 같다(같은 zip에서 model.py와 설정만 제자리 교체). 09번은 zip에 Qwen이 들어 있지만 `qwen_weight: 0`이라 불러오지 않는다.
+- 13번은 여기에 BLIP LoRA b(`models/blip/lora_ft.safetensors`)를 더한 것, 15번은 LoRA c를 넣고 Qwen 가중치를 scene으로 바꾼 것. 목록은 `WEIGHTS.md`.
+- 12번 `sub_ens5_k22k3_scene_r192_t840`(0.5181)과 14번 `SIGLIP+BLIP-2_v4`는 다른 트랙(C, A)의 제출이라 이 표에 없다. 12번은 이 폴더 코드에 Qwen scene을 넣은 C의 버전.
 
 ## 파일
 | 파일 | 내용 |
@@ -30,6 +34,7 @@
 | `model_zip_min.py` | v4의 주석 제거·들여쓰기 1칸 압축본(AST 동일). zip 안 model.py를 같은 크기로 제자리 교체하려고 만든 것. 11번 zip에 실제로 들어간 파일 |
 | `model_k32_blip_only.py` | 09번 zip에 실제로 들어간 파일 (BLIP만, Qwen 없음) |
 | `ens_config.*.json` | 제출별 설정 (위 표) |
+| `../tools/zip_append.py`, `../tools/zip_replace_inplace.py`, `../tools/check_scene.py` | zip에 작은 파일 덧붙이기 / 같은 크기의 큰 파일 제자리 교체 / Qwen 가중치 구조 비교 |
 | `WEIGHTS.md` | zip 안 가중치 파일의 크기·CRC32·출처. 가중치 자체는 용량 때문에 git에 없음 |
 
 ## 만들기
@@ -41,6 +46,10 @@ python tools/build_ens.py --out sub_ens --siglip <A models/> --blip <A reranker/
 # 이미 있는 zip에 파일을 덧붙이거나 바꾸기 (3.9GB 전체를 다시 쓰지 않음)
 python tools/zip_append.py sub.zip model.py=submission_ens/model.py models/ens_config.json=<설정.json> \
     models/blip/lora_ft.safetensors=<LoRA 파일> --drop __pycache__/model.cpython-313.pyc
+
+# Qwen 가중치처럼 큰 파일은 같은 크기일 때만 제자리 교체 (덧붙이면 옛 파일이 zip에 남아 5GB를 넘음)
+python tools/check_scene.py sub.zip <새 int8.safetensors>          # 텐서 이름·형식·크기가 같은지 먼저 확인
+python tools/zip_replace_inplace.py sub.zip models/qwen/int8.safetensors <새 int8.safetensors>
 ```
 
 ## 검증
@@ -54,11 +63,16 @@ python tools/zip_append.py sub.zip model.py=submission_ens/model.py models/ens_c
 
 주의: A 모델은 무작위 분할로 학습해 형제 이미지를 봤기 때문에 이 로컬 점수는 부풀려져 있다. 테스트 판단은 리더보드로.
 
-(2) BLIP LoRA 검증: 학습에 안 쓴 8장 세트 40개(320 질문) × 후보 4,000장, `model.py`(v5) K32 BLIP만
+(2) BLIP LoRA 검증: 학습에 안 쓴 8장 세트 40개(320 질문) × 후보 4,000장, `model.py`(v5)
 | 버전 | 점수 | R@1 | R@5 |
 |---|---|---|---|
-| LoRA b (lr 6e-4, 4바퀴) | 0.844 | .781 | .994 |
+| LoRA b, K32 BLIP만 | 0.844 | .781 | .994 |
+| LoRA b + Qwen v4 상위 2장 (K20) | 0.912 | .881 | .994 |
+| LoRA c + Qwen v4 상위 2장 (K20) | 0.922 | .894 | .994 |
+| LoRA c + Qwen v4 상위 3장 (K20) | 0.929 | .903 | .994 |
 
-세트 안 8지선다(같은 320 질문): 학습 전 0.692 (R@1 .566) → LoRA b 0.846 (R@1 .784). 학습 코드 `train/blip_ft.py`, 기록 `docs/B_track_guide.md` 11/22 04:30 항목.
+세트 안 8지선다(같은 320 질문): 학습 전 0.692 (R@1 .566) → LoRA b 0.846 (R@1 .784) → LoRA c 0.892 (R@1 .850). 학습 코드 `train/blip_ft.py`(b), `train/blip_ft2.py`(c), 기록 `docs/B_track_guide.md` 11/22 04:30·05:20 항목.
+
+주의: 이 로컬 수치는 8장 세트 기준이라 테스트(32장 세트)보다 훨씬 높게 나온다. 13번은 로컬 0.912, 리더보드 0.5305.
 
 - 실험 근거·기각한 아이디어는 `docs/B_track_guide.md` 11/22 항목 참고.
