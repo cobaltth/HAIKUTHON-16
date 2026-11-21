@@ -1,0 +1,11 @@
+haikuthon-train/
+*.zip
+*.png
+*.parquet
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+__pycache__/
+.ipynb_checkpoints/
