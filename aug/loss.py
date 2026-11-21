@@ -19,3 +19,13 @@ def siglip_loss(img, txt, logit_scale, logit_bias, neg_txt=None, neg_owner=None,
         neg_logits = (img[neg_owner] * neg_txt).sum(-1) * scale + logit_bias
         loss = loss + neg_weight * (-F.logsigmoid(-neg_logits)).sum() / len(img)
     return loss
+
+
+def clip_loss(img, txt, logit_scale, neg_txt=None, neg_owner=None):
+    """CLIP 계열(소프트맥스) 손실. 가짜 캡션은 이미지→텍스트 방향의 추가 오답 열로 붙인다.
+    (가짜 캡션은 원래 이미지에게는 '거의 맞지만 틀린' 오답, 다른 이미지에게는 무관한 오답이라 전부 오답으로 써도 됨)"""
+    scale = logit_scale.exp()
+    logits = img @ txt.T * scale
+    target = torch.arange(len(img), device=img.device)
+    i2t_logits = logits if neg_txt is None or not len(neg_txt) else torch.cat([logits, img @ neg_txt.T * scale], 1)
+    return (F.cross_entropy(i2t_logits, target) + F.cross_entropy(logits.T, target)) / 2
