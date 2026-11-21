@@ -4,7 +4,7 @@
 
 | 파일 | 내용 | 종류 |
 |---|---|---|
-| `image_aug.py` | `weak_square_crop`(0.8~1.0배), `hflip` | 증강(새 정답 쌍) |
+| `image_aug.py` | `weak_square_crop`(0.9~1.0배), `hflip` | 증강(새 정답 쌍) |
 | `text_aug.py` | `swap_left_right` (반전 이미지와 짝 → 새 정답 쌍) / `hard_negatives` (색·색결합·관계·무늬·재질 변형 → 오답 캡션) | 증강 + 오답 생성 |
 | `dataset.py` | `make_pair` (증강 적용한 정답 쌍 + 오답 캡션), `GroupBatchSampler` (형제를 같은 배치에) | 샘플링 |
 | `loss.py` | `siglip_loss` + 텍스트 hard negative 항 | 손실 |
@@ -23,3 +23,7 @@
 3. + flip_swap_p=0.5
 4. + n_text_neg=2 (loss의 neg_txt)
 5. + crop_p=0.5
+
+## 육안 점검 (viz/)
+- 좌우 반전 + left↔right 교환: 샘플 4개(0002, 3458, 0165, 3399) 모두 캡션과 일치. 이미지 안 글자 없음 → 반전 안전
+- 크롭 0.8~1.0: 가장자리 물체가 반쯤 잘리는 사례 2건(0572 물뿌리개, 1060 기타) → 개수·물체 정보 훼손 위험. 기본값 0.9로 상향, ablation 마지막 순위

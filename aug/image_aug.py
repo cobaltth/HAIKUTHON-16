@@ -3,8 +3,8 @@ import random
 from PIL import Image, ImageOps
 
 
-def weak_square_crop(img, rng=None, min_scale=0.8):
-    """한 변을 원본의 min_scale~1.0배로 자른 뒤 원래 크기로 되돌림. 물체가 잘려 개수가 바뀌지 않도록 약하게만."""
+def weak_square_crop(img, rng=None, min_scale=0.9):
+    """한 변을 원본의 min_scale~1.0배로 (기본 0.9: 0.8에서는 가장자리 물체가 반쯤 잘리는 사례 확인) 자른 뒤 원래 크기로 되돌림. 물체가 잘려 개수가 바뀌지 않도록 약하게만."""
     rng = rng or random
     w, h = img.size
     s = rng.uniform(min_scale, 1.0)
