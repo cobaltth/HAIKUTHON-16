@@ -49,3 +49,16 @@
 - zip 안 `models/qwen/int8.safetensors`를 C의 Drive `haikuthon/qwen_lora_scene/int8.safetensors`로 제자리 교체했다.
 - 크기 2,162,922,376바이트(v4와 같음), CRC32 `968a464c` (v4는 `61e3adb3`). 텐서 927개의 이름·dtype·shape가 v4와 같다. 프롬프트는 v4와 같은 빈 프롬프트.
 - 제출 15의 zip: `sub_final_c_scene.zip` (3,886,200,008바이트). `model.py`·설정·LoRA는 `zip_append.py`로 덧붙였기 때문에, 목차에서 빠진 옛 항목의 바이트가 본문에 조금 남아 있다(무시됨).
+
+## 내지 않은 예비 zip (LoRA c + Qwen scene, K28·상위 2장)
+- `sub_final2_c_scene_k28_qwen2.zip` (3,886,200,216바이트, 항목 22개). 15번을 올린 뒤 같은 zip에 `models/ens_config.json`만 `zip_append.py`로 덧붙이고 이름을 바꾼 것이라, 15번 zip보다 208바이트 크고 나머지는 같다.
+- 15번 zip을 다시 만들려면 이 파일의 설정만 `ens_config.lora_c_scene_k20_qwen3.json`으로 되돌리면 된다.
+
+| zip 안 경로 | 바이트 | CRC32 | 내용 |
+|---|---|---|---|
+| `model.py` | 28,750 | `e5391846` | `submission_ens/model.py` (v5, md5 c2d80207…) |
+| `models/ens_config.json` | 156 | `48e085c9` | `ens_config.lora_c_scene_k28_qwen2.json` |
+| `models/blip/lora_ft.safetensors` | 9,717,540 | `fc67db23` | `blip_lora_c.safetensors` |
+| `models/qwen/int8.safetensors` | 2,162,922,376 | `968a464c` | Qwen scene |
+| `models/blip/model_q8.safetensors` | 1,284,342,816 | `a9388d01` | 위 표와 같음 |
+| `models/siglip/model.safetensors` | 406,360,284 | `7f62f2da` | 위 표와 같음 |

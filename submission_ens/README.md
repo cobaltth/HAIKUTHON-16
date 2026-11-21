@@ -18,12 +18,14 @@
 | 11 | `blip_k24_qwen3_fuse` | `model_zip_min.py` (md5 4a9e0386…, 읽기용 원본 `model_v4_fuse.py`) | `ens_config.k20_qwen2_fuse.json` | 0.4804 | .396 / .719 | 738s |
 | 13 | `lora_k28_qwen2_fuse` | `model.py` (v5, md5 c2d80207…) + LoRA b | `ens_config.lora_b_k28_qwen2.json` | 0.5305 | .438 / .784 | 811s |
 | 15 | `lora_c_scene_k20_qwen3` | `model.py` (v5) + LoRA c + Qwen scene | `ens_config.lora_c_scene_k20_qwen3.json` | (결과 대기) | | 예상 818s |
+| — | `lora_c_scene_k28_qwen2` (07:20 기준 미제출) | `model.py` (v5) + LoRA c + Qwen scene | `ens_config.lora_c_scene_k28_qwen2.json` | — | | 예상 812s |
 
 - **11번 이름 주의.** 사이트에 적은 이름은 `blip_k24_qwen3_fuse`지만, 올린 zip(`sub_blip_qwen_fuse_v4.zip`) 안의 실제 설정은 **k1=20, k3=2, stage2_deadline 620, time_limit 838**이다. k1=24·k3=3 설정으로 낸 제출은 없다(이름만 이전 계획대로 적은 것). 그래서 `ens_config.k24_...` 파일은 없고, `ens_config.k20_qwen2_fuse.json`이 11번의 설정이다.
   - 확인 방법: zip 안 `models/ens_config.json`은 같은 JSON 뒤에 공백을 붙여 114바이트로 맞춘 것(CRC32 `e704fd47`), `model.py`는 `model_zip_min.py`와 같은 바이트(20,987바이트, CRC32 `7f5c404c`).
 - 06번에는 3단계에서 "2단계 1·2위 차이가 작은 질문부터" Qwen을 돌리는 순서가 들어 있었다. 운영진 답변(11/22 04:15, "한 질문의 결과가 다른 테스트 항목의 예측 때문에 달라지면 안 됨") 기준으로 걸리므로 **최종 선택에서 제외**. 09·11번에는 그 순서가 없다.
 - 06·09·11번의 가중치 파일은 같다(같은 zip에서 model.py와 설정만 제자리 교체). 09번은 zip에 Qwen이 들어 있지만 `qwen_weight: 0`이라 불러오지 않는다.
 - 13번은 여기에 BLIP LoRA b(`models/blip/lora_ft.safetensors`)를 더한 것, 15번은 LoRA c를 넣고 Qwen 가중치를 scene으로 바꾼 것. 목록은 `WEIGHTS.md`.
+- **만들어 두고 내지 않은 zip.** `sub_final2_c_scene_k28_qwen2.zip`(3,886,200,216바이트)은 15번 zip에 설정만 K28·상위 2장(`ens_config.lora_c_scene_k28_qwen2.json`)으로 덧붙인 것이다. `model.py`와 가중치는 15번과 같다. 13번과 같은 배분(K28·상위 2장)이라 실행 시간은 약 812초로 예상한다. 11/22 07:20 기준 제출하지 않았다.
 - 12번 `sub_ens5_k22k3_scene_r192_t840`(0.5181)과 14번 `SIGLIP+BLIP-2_v4`는 다른 트랙(C, A)의 제출이라 이 표에 없다. 12번은 이 폴더 코드에 Qwen scene을 넣은 C의 버전.
 
 ## 파일

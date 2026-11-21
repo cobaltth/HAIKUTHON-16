@@ -1,0 +1,1 @@
+{"blip_weight":0.9,"k1":28,"k3":2,"qwen_weight":0.5,"rr_res":192,"stage2_deadline":740,"time_limit":850,"qwen_vc_tol":3.0,"blip_lora":"lora_ft.safetensors"}
