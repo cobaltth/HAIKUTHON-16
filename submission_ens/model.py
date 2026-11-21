@@ -13,6 +13,10 @@
 ZIP 구성
   model.py
   models/ens_config.json         설정 (아래 DEFAULT_CFG 덮어쓰기)
+  models/siglip/                 SigLIP Base (A 학습본; HF 형식)
+  models/siglip2/   (선택)       SigLIP2 so400m (C의 1단계; 있으면 s2_weight로 융합)
+  models/blip/                   BLIP-2 ITM (HF 형식, 또는 model_q8.safetensors + q8_meta.json)
+  models/qwen/      (선택)       Qwen3-VL-Reranker (C 형식 int8.safetensors 또는 HF 형식)
 """
 import contextlib
 import json
@@ -46,6 +50,9 @@ DEFAULT_CFG = {
     "blip_image_batch": 96,
     "blip_pair_batch": 512,
     "qwen_batch": 16,
+    "qwen_vcache": True,      # C v7: Qwen 비전 특징을 이미지당 1회만 계산 (False면 기존 경로)
+    "qwen_vc_batch": 32,
+    "qwen_vc_tol": 0.5,
     "qwen_system": "",        # C v4: 시스템/지시문 없이 LoRA 학습
     "qwen_instruct": "",
     "s1_img_batch": 128,
@@ -338,39 +345,144 @@ def _qwen_prompt(m, query):
 
 @torch.inference_mode()
 def _stage3(m, texts, arr, order_i, margin, deadline):
-    """order_i: (Q, k3) 2단계 순위의 이미지 인덱스. margin 작은 질문부터, 칸 0·1 → 칸 2 … 순서로 채점."""
+    """order_i: (Q, k3) 2단계 순위의 이미지 인덱스. 모든 질문을 입력 순서대로, 칸 0·1 → 칸 2 … 순서로 똑같이 채점 (margin은 쓰지 않음).
+
+    qwen_vcache=True (C v7): 비전 인코더는 질의와 무관하므로 이미지당 한 번만 돌려 GPU에 두고, 쌍마다 언어 모델만 돌린다.
+    Colab L4 실측 14.1 → 9.9 ms/쌍, 점수 차이 0.0000. 시작할 때 8쌍을 기존 경로와 비교해 다르면(또는 예외가 나면) 기존 경로로 돌아간다."""
     cfg, dev = m["cfg"], m["device"]
     lm, proc, w, bs = m["qwen"], m["qwen_proc"], m["qwen_w"], cfg["qwen_batch"]
     nq, k3 = order_i.shape
-    qs = sorted(range(nq), key=lambda q: margin[q])
+    qs = list(range(nq))      # 입력 순서 그대로: 다른 질문의 점수로 처리 우선순위를 정하지 않는다 (질문별 독립 예측)
     plan = [(q, r) for q in qs for r in range(min(2, k3))] + [(q, r) for r in range(2, k3) for q in qs]
     logits = torch.full((nq, k3), float("nan"))
     prompts = {}
 
-    def prep(chunk):
-        tx = []
-        for q, _ in chunk:
-            if q not in prompts:
-                prompts[q] = _qwen_prompt(m, texts[q])
-            tx.append(prompts[q])
-        ims = [Image.fromarray(arr[order_i[q, r]]) for q, r in chunk]
-        return proc(text=tx, images=ims, padding=True, return_tensors="pt", do_resize=False)
+    def prompt_of(q):
+        if q not in prompts:
+            prompts[q] = _qwen_prompt(m, texts[q])
+        return prompts[q]
 
-    chunks = [plan[s:s + bs] for s in range(0, len(plan), bs)]
-    done = 0
-    with ThreadPoolExecutor(1) as ex:
-        fut = ex.submit(prep, chunks[0]) if chunks else None
-        for ci, chunk in enumerate(chunks):
+    def prep(chunk):
+        ims = [Image.fromarray(arr[order_i[q, r]]) for q, r in chunk]
+        return proc(text=[prompt_of(q) for q, _ in chunk], images=ims, padding=True, return_tensors="pt", do_resize=False)
+
+    def score_ref(inputs):
+        return (lm.model(**inputs.to(dev)).last_hidden_state[:, -1].float() @ w).cpu()
+
+    def run_reference(todo):
+        chunks = [todo[s:s + bs] for s in range(0, len(todo), bs)]
+        n = 0
+        with ThreadPoolExecutor(1) as ex:
+            fut = ex.submit(prep, chunks[0]) if chunks else None
+            for ci, chunk in enumerate(chunks):
+                if time.time() > deadline:
+                    break
+                inputs = fut.result()
+                if ci + 1 < len(chunks):
+                    fut = ex.submit(prep, chunks[ci + 1])
+                for (q, r), v in zip(chunk, score_ref(inputs)):
+                    logits[q, r] = v
+                n += len(chunk)
+        return n
+
+    def run_cached():
+        from types import SimpleNamespace
+        ip, tk = proc.image_processor, proc.tokenizer
+        img_tok, pad_id = lm.config.image_token_id, tk.pad_token_id
+        image_token = getattr(proc, "image_token", "<|image_pad|>")
+        vb, ib, blk = int(cfg.get("qwen_vc_batch", 32)), 64, int(cfg.get("qwen_vc_block", 1024))
+        all_imgs = np.unique(np.array([order_i[q, r] for q, r in plan], dtype=np.int64))
+        pos = np.full(len(arr), -1, dtype=np.int64)
+        st = {"E": None, "D": None, "n": 0, "grid": None, "ntok": None, "ids": {}}
+
+        def img_prep(js):
+            return ip(images=[Image.fromarray(arr[j]) for j in js], do_resize=False, return_tensors="pt")
+
+        def build(need):
+            groups = [need[s:s + ib] for s in range(0, len(need), ib)]
+            with ThreadPoolExecutor(1) as ex:
+                fut = ex.submit(img_prep, groups[0]) if groups else None
+                for gi, js in enumerate(groups):
+                    enc = fut.result()
+                    if gi + 1 < len(groups):
+                        fut = ex.submit(img_prep, groups[gi + 1])
+                    grid = enc["image_grid_thw"].to(dev)
+                    out = lm.model.get_image_features(enc["pixel_values"].to(dev), grid, return_dict=True)
+                    e = torch.stack(list(out.pooler_output))                                  # (b, ntok, D)
+                    d = torch.stack([torch.stack(list(f)) for f in out.deepstack_features])   # (L, b, ntok, D)
+                    if st["E"] is None:
+                        st["E"] = torch.empty((len(all_imgs),) + tuple(e.shape[1:]), dtype=e.dtype, device=dev)
+                        st["D"] = torch.empty((d.shape[0], len(all_imgs)) + tuple(d.shape[2:]), dtype=d.dtype, device=dev)
+                        st["grid"], st["ntok"] = grid[:1].clone(), int(e.shape[1])
+                    n0 = st["n"]
+                    st["E"][n0:n0 + len(js)] = e
+                    st["D"][:, n0:n0 + len(js)] = d
+                    pos[np.asarray(js)] = np.arange(n0, n0 + len(js))
+                    st["n"] = n0 + len(js)
+
+        def tok_ids(q):
+            if q not in st["ids"]:
+                st["ids"][q] = tk(prompt_of(q).replace(image_token, image_token * st["ntok"]), add_special_tokens=False)["input_ids"]
+            return st["ids"][q]
+
+        def make_ids(chunk):
+            seqs = [tok_ids(q) for q, _ in chunk]
+            L = max(len(x) for x in seqs)
+            ids = torch.full((len(chunk), L), pad_id, dtype=torch.long)
+            am = torch.zeros((len(chunk), L), dtype=torch.long)
+            for i, x in enumerate(seqs):          # 왼쪽 패딩: 마지막 위치가 항상 실제 마지막 토큰
+                ids[i, L - len(x):] = torch.tensor(x, dtype=torch.long)
+                am[i, L - len(x):] = 1
+            return ids, am
+
+        def score_cached(chunk):
+            ids, am = make_ids(chunk)
+            ids, am = ids.to(dev), am.to(dev)
+            j = torch.as_tensor(pos[[order_i[q, r] for q, r in chunk]], device=dev)
+            E, D = st["E"][j], st["D"][:, j]
+            feats = SimpleNamespace(pooler_output=(E.reshape(-1, E.shape[-1]),),
+                                    deepstack_features=[(D[l].reshape(-1, D.shape[-1]),) for l in range(D.shape[0])])
+            out = lm.model(input_ids=ids, attention_mask=am, image_grid_thw=st["grid"].expand(len(chunk), -1),
+                           mm_token_type_ids=(ids == img_tok).to(torch.int32), mm_encoder_outputs={"image": feats})
+            return (out.last_hidden_state[:, -1].float() @ w).cpu()
+
+        # 자체 검증: 처음 8쌍을 기존 경로와 비교
+        probe = plan[:min(8, len(plan))]
+        build([int(j) for j in dict.fromkeys(int(order_i[q, r]) for q, r in probe)])
+        diff = float((score_ref(prep(probe)) - score_cached(probe)).abs().max())
+        _log(cfg, f"qwen vcache 자체 검증: 최대 점수 차이 {diff:.4f} (허용 {cfg.get('qwen_vc_tol', 0.5)})")
+        if not (diff <= float(cfg.get("qwen_vc_tol", 0.5))):
+            return -1
+        n = 0
+        for s in range(0, len(plan), blk):       # 우선순위(여유 작은 질문 먼저)는 블록 단위로 유지하고, 블록 안에서만 길이순으로 묶는다
             if time.time() > deadline:
                 break
-            inputs = fut.result()
-            if ci + 1 < len(chunks):
-                fut = ex.submit(prep, chunks[ci + 1])
-            h = lm.model(**inputs.to(dev)).last_hidden_state[:, -1].float()
-            sc = (h @ w).cpu()
-            for (q, r), v in zip(chunk, sc):
-                logits[q, r] = v
-            done += len(chunk)
+            block = plan[s:s + blk]
+            build([int(j) for j in np.unique(np.array([order_i[q, r] for q, r in block], dtype=np.int64)) if pos[j] < 0])
+            block = sorted(block, key=lambda p: len(tok_ids(p[0])))
+            for c in range(0, len(block), vb):
+                if time.time() > deadline:
+                    break
+                chunk = block[c:c + vb]
+                for (q, r), v in zip(chunk, score_cached(chunk)):
+                    logits[q, r] = v
+                n += len(chunk)
+        return n
+
+    done = -1
+    if cfg.get("qwen_vcache", True) and plan:
+        try:
+            done = run_cached()
+        except Exception as e:  # API가 다르면 기존 경로로 (여전히 유효한 제출)
+            _log(cfg, f"qwen vcache 실패({e!r}) → 기존 경로")
+            done = -1
+        if done < 0:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            todo = [p for p in plan if torch.isnan(logits[p[0], p[1]])]
+            done = (len(plan) - len(todo)) + run_reference(todo)
+    else:
+        done = run_reference(plan)
     return logits, done, len(plan)
 
 
@@ -417,7 +529,7 @@ def predict(model, queries, candidates, top_k=5):
     final = rank_i.clone()                                       # (Q, k1) → 마지막에 top_k만 사용
     if "qwen" in m and cfg["k3"] >= 2:
         k3 = min(cfg["k3"], rank_i.shape[1])
-        margin = torch.nan_to_num(rank_s[:, 0] - rank_s[:, 1], nan=0.0, posinf=0.0, neginf=0.0).tolist()
+        margin = None                                             # (이전 버전의 '헷갈리는 질문 먼저'는 제거)
         lq, done, plan = _stage3(m, texts, arr, rank_i[:, :k3].numpy(), margin, t0 + cfg["time_limit"])
         wq = cfg["qwen_weight"]
         n_used = 0
@@ -431,11 +543,14 @@ def predict(model, queries, candidates, top_k=5):
             base = rank_s[q:q + 1, :kd]
             if not torch.isfinite(base).all():          # 2단계 미처리 질문: 1단계 점수 순위를 기준으로
                 base = -torch.arange(kd, dtype=torch.float32)[None]
-            sub = (1 - wq) * _zq(base) + wq * _zq(row[None, :kd])
+            if cfg.get("qwen_fuse", "logit") == "logit":   # BLIP 표준화 점수 + Qwen 로짓/배율: 한쪽이 못 읽는 속성은 다른 쪽이 결정
+                sub = base + row[None, :kd] / float(cfg.get("qwen_scale", 8.0))
+            else:
+                sub = (1 - wq) * _zq(base) + wq * _zq(row[None, :kd])
             o = sub[0].argsort(descending=True)
             final[q, :kd] = rank_i[q, :kd][o]
             n_used += 1
         _log(cfg, f"stage3 {time.time()-t2:.0f}s | Qwen 쌍 {done}/{plan}, 반영 질문 {n_used}")
     preds = {qid: [img_ids[j] for j in row[:top_k]] for qid, row in zip(qids, final.tolist())}
     _log(cfg, f"predict {time.time()-t0:.0f}s")
-    return preds                                                          
+    return preds

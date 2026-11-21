@@ -24,3 +24,14 @@ python tools/build_ens.py --out sub_ens --siglip <A models/> --blip <A reranker/
 | 앙상블 K=15/840 int8 (제출) | 0.802 | .730 | .987 |
 
 주의: A 모델은 무작위 분할로 학습해 형제 이미지를 봤기 때문에 이 로컬 점수는 부풀려져 있음. 테스트 판단은 리더보드로.
+
+## 11/22 새벽 버전 (파일 안내)
+| 파일 | 내용 | 제출 |
+|---|---|---|
+| `model_k32_blip_only.py` + `ens_config.k32_blip_fp16.json` | SigLIP(A) top32 → BLIP-2(A) 전부 재정렬. ITM fp16(autocast) + 문장 길이순 묶음. Qwen 없음 | 09 `sub_blip_k32_fp16` |
+| `model.py` + `ens_config.k20_qwen2_fuse.json` | 위 구조 + Qwen(C v4, 192px, C의 비전 캐시 패치) 상위 k3. 최종 = BLIP 표준화 점수 + Qwen 로짓/8 합산 | `sub_blip_qwen_fuse_v4.zip` (미제출) |
+| `model_zip_min.py` | `model.py`의 주석 제거·들여쓰기 1칸 압축본 (AST 동일). zip 안 model.py를 같은 크기(20,987바이트)로 제자리 교체하려고 만든 것 | 위 zip에 실제로 들어간 파일 |
+
+- 규정(질문별 독립 예측) 반영: 이전 버전의 "2단계 1·2위 차이가 작은 질문부터 Qwen" 순서는 **제거**. 모든 질문을 입력 순서대로 같은 깊이까지 처리. (06 `ens_A_blip_C_qwen_k15`에는 그 순서가 들어 있었으므로 최종 선택에서 제외)
+- 로컬 확인(clean 304 × 4,000, Kaggle T4): K32 BLIP만 0.6873 (R@1 .5625), 형식 검사 통과. Qwen 결합 버전은 형식 검사 통과 + 비전 캐시 자체 검증 차이 0.0000.
+- 실험 근거·기각한 아이디어는 `docs/B_track_guide.md` 11/22 항목 참고.
