@@ -1,0 +1,1 @@
+{"k_min": 8, "k_max": 8, "rr_res": 192, "time_limit": 840, "vcache": true, "vc_tol": 3.0, "fam_k": 32, "fam_n0": 4, "fam_step": 1, "fam_beta": 0.25, "cube": true, "cube_mode": "nbr_kernel", "cube_beta": 1.0, "cube_tau": 0.25, "cube_fit_w": 1.0}
