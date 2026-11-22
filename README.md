@@ -20,7 +20,7 @@
 
 ```mermaid
 flowchart LR
-    A["프롬프트 8,000 × 이미지 16,000"] --> B["① SigLIP<br/>Top-32"] --> C["② BLIP-2 ITM<br/>32개 재정렬"] --> D["③ Qwen VLM<br/>1·2위 재판정"] --> E["Top-5"]
+    A["프롬프트 8,000 × 이미지 16,000"] --> B["① SigLIP<br/>Top-16"] --> C["② BLIP-2 ITM<br/>16개 재정렬"] --> D["③ Qwen VLM<br/>1·2위 재판정"] --> E["Top-5"]
 ```
 
 - **학습:** BLIP-2 Q-Former를 형제 이미지, 형제의 실제 프롬프트, 규칙으로 만든 오답 문장(색·개수 교체, 위아래·좌우 반전), 좌우 반전 이미지 짝으로 fine-tuning했습니다.
